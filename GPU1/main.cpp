@@ -7,6 +7,8 @@
 #include <random>
 #include <queue>
 #include <condition_variable>
+#include <iostream>
+#include <fstream>
 
 #include "GaussianElimination.h"
 
@@ -14,8 +16,11 @@ constexpr int MATRIX_DIM = 10;
 constexpr int STAGE2_BUFFER_SIZE = 100000;
 constexpr int STAGE2_WORKERS_COUNT = 10;
 constexpr double max_digit_mag = 50.0;
+constexpr int matrix_count = 500;
 
 std::mutex mut;
+std::mutex solv_mut;
+std::mutex print_mut;
 using namespace std;
 
 
@@ -38,12 +43,30 @@ public:
 		}
 	}
 
-	bool GaussianElimination() {
-		//std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+	void GaussianElimination() {
 		upper_triangular= MakeUpperTriangular(matrix);
 		std::cout << "Processed matrix: " << id << std::endl;
-		return false;
 	}
+	void MatrixSolution() {
+		solution = GetValues(upper_triangular);
+		std::cout << "Solved matrix: " << id << std::endl;
+	}
+	void PrintSolution(ofstream &file) {
+		file << "Solved matrix with id: " << id << endl;
+		file << "Matrix data: " << std::endl;;
+		for(auto& row : matrix) {
+			for(auto& element : row) {
+				file << element << " ";
+			}
+			file << std::endl;
+		}
+		file << "Matrix slution: " << std::endl;;
+		for(auto& element : solution) {
+			file << element << " ";
+		}
+		file << std::endl;
+	}
+
 
 	std::vector<std::vector<double>> matrix;
 	std::vector<std::vector<double>> upper_triangular;
@@ -114,13 +137,87 @@ public:
 	uint32_t matrix_id = 0;
 };
 
-void count() {
-	while (1) { int a = 0; }
-}
+class MatrixPrinter {
+public:
+	MatrixPrinter() {
+		myfile.open("matrixresults.txt");
+		
+	}
+	~MatrixPrinter() {
+		myfile.close();
+	}
+	void Run() {
+		while(true) {
+			std::unique_lock<std::mutex> print_ul(print_mut);
+			if (matrix_task_rdy == true) {
+				matrix_task.PrintSolution(myfile);
+				matrix_task_rdy = false;
+			}
+			else {
+				printer_data_rdy.wait(print_ul, [&] {return matrix_task_rdy == true; });
+				matrix_task.PrintSolution(myfile);
+				matrix_task_rdy = false;
+			}
+			print_ul.unlock();
+			printer_rdy.notify_one();
+		}
+	}
+	MatrixPrinter* Subscribe() {
+		return this;
+	}
+
+	ofstream myfile;
+	Task matrix_task;
+	std::atomic_bool matrix_task_rdy = false;
+	std::condition_variable printer_rdy;
+	std::condition_variable printer_data_rdy;
+};
+
+
+class MatrixSolver {
+public:
+	MatrixSolver(MatrixPrinter* matrix_printer) :
+	printer(matrix_printer)
+	{}
+	MatrixSolver* Subscribe() {
+		return this;
+	}
+	void Run() {
+		while(true) {
+			std::unique_lock<std::mutex> ul(solv_mut);
+			if(matrix_task_rdy == true) {
+				matrix_task.MatrixSolution();
+				matrix_task_rdy = false;
+			}
+			else {
+				cond_data_rdy.wait(ul, [&] {return matrix_task_rdy == true; });
+			}
+			ul.unlock();
+			cond_solver_rdy.notify_one();
+			std::unique_lock<std::mutex> print_ul(print_mut);
+			if(printer->matrix_task_rdy == false) {
+				printer->matrix_task = matrix_task;
+				printer->matrix_task_rdy = true;
+			}
+			else {
+				printer->printer_rdy.wait(print_ul, [&] {return printer->matrix_task_rdy == false; });
+				printer->matrix_task = matrix_task;
+				printer->matrix_task_rdy = true;
+			}
+			print_ul.unlock();
+			printer->printer_data_rdy.notify_one();
+		}
+	}
+
+	MatrixPrinter* printer;
+	Task matrix_task;
+	std::atomic_bool matrix_task_rdy = false;
+	std::condition_variable cond_solver_rdy;
+	std::condition_variable cond_data_rdy;
+};
 
 class ThreadPool {
 public:
-
 	void Work() {
 		Task task;
 		while(true) {
@@ -135,14 +232,26 @@ public:
 			ul.unlock();
 			task_queue->cond_full.notify_one();
 			task.GaussianElimination();
+			std::unique_lock<std::mutex> sol_ul(solv_mut);
+			if(solver->matrix_task_rdy==false) {
+				solver->matrix_task = task;
+				solver->matrix_task_rdy = true;
+			}
+			else {
+				solver->cond_solver_rdy.wait(sol_ul, [&] {return solver->matrix_task_rdy == false; });
+				solver->matrix_task = task;
+				solver->matrix_task_rdy = true;
+			}
+			sol_ul.unlock();
+			solver->cond_data_rdy.notify_one();
 			//TODO send to third block
 		}
 	}
 	std::thread SpawnThread() {
 		return std::thread([this] {this->Work(); });
 	}
-	ThreadPool(const int count, TaskQueue* task_queue) :
-	workers_count(count) , task_queue(task_queue){
+	ThreadPool(const int count, TaskQueue* task_queue, MatrixSolver* matrix_solver) :
+	workers_count(count) , task_queue(task_queue), solver(matrix_solver){
 		for(int i = 0; i < workers_count; i++) {
 			workers.push_back(SpawnThread());
 		}
@@ -152,18 +261,20 @@ public:
 const int workers_count;
 std::vector<std::thread> workers;
 TaskQueue* task_queue;
+MatrixSolver* solver;
 };
 
-class MatrixSolver {
-	Task matrix_task;
-	std::atomic_bool matrix_task_rdy;
-};
 
 int main() {
 	TaskQueue task_queue;
 	MatrxiGenerator matrix_gen(task_queue.Subscribe());
-	ThreadPool thread_pool(10, task_queue.Subscribe());
-	matrix_gen.Run();
-	std::this_thread::sleep_for(std::chrono::seconds(30));
+	MatrixPrinter matrix_printer;
+	std::thread printer([&] {matrix_printer.Run(); });
+	MatrixSolver matrix_solver(matrix_printer.Subscribe());
+	std::thread solver([&] {matrix_solver.Run(); });
+	ThreadPool thread_pool(10, task_queue.Subscribe(), matrix_solver.Subscribe());
+	//matrix_gen.Run();
+	std::thread generator([&] {matrix_gen.Run(); });
+	std::this_thread::sleep_for(std::chrono::seconds(5));
 	return 0;
 }
