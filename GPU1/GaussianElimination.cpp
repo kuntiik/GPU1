@@ -17,16 +17,15 @@ std::vector<std::vector<double>> MakeUpperTriangular(std::vector<std::vector<dou
 	return M;
 }
 
-std::vector<double> GetValues(std::vector<std::vector<double>> M) {
+void GetValues(std::vector<std::vector<double>> &M, std::vector<double> &solution) {
 	int n = M.size();
-	std::vector<double> solution(n, 0);
 	double s;
-	for(int i = n-1; i>= 0; i--) {
+	for(int i = n -1; i>= 0; i--) {
 		s = 0;
 		for(int j = i+1; j < n; j++) {
 			s += M[i][j] * solution[j];
-			solution[i] = (M[i][n] - s) / M[i][i];
 		}
+		solution[i] = (M[i][n] - s) / M[i][i];
 	}
-	return solution;
+	return;
 }
