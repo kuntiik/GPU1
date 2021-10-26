@@ -118,6 +118,9 @@ public:
 		while(true) {
 			auto task = Task(matrix_id);
 			matrix_id++;
+			if(matrix_id >  matrix_count) {
+				
+			}
 			std::unique_lock<std::mutex> ul(mut);
 			if(!task_queue->Full()) {
 				//task_queue->q_mutex.lock();
@@ -147,7 +150,7 @@ public:
 		myfile.close();
 	}
 	void Run() {
-		while(true) {
+		while(running) {
 			std::unique_lock<std::mutex> print_ul(print_mut);
 			if (matrix_task_rdy == true) {
 				matrix_task.PrintSolution(myfile);
@@ -169,6 +172,7 @@ public:
 	ofstream myfile;
 	Task matrix_task;
 	std::atomic_bool matrix_task_rdy = false;
+	std::atomic_bool running = true;
 	std::condition_variable printer_rdy;
 	std::condition_variable printer_data_rdy;
 };
