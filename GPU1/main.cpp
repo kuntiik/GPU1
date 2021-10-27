@@ -1,5 +1,4 @@
 //Minor inspiration came from https://eariassoto.github.io/post/producer-consumer/
-
 #include <iostream>
 #include<thread>
 #include<mutex>
@@ -13,28 +12,23 @@
 
 #include "GaussianElimination.h"
 
-constexpr int MATRIX_DIM = 2;
+constexpr int MATRIX_DIM = 200;
 constexpr int STAGE2_BUFFER_SIZE = 100000;
 constexpr int STAGE2_WORKERS_COUNT = 10;
 constexpr double max_digit_mag = 50.0;
 constexpr int matrix_count = 500;
 
+//mutexes to synchronize data between printer, generator, solver, worker
 std::mutex mut;
 std::mutex solv_mut;
 std::mutex print_mut;
-using namespace std;
 
 
+//All processes that needs to be done to solve a matrix:
+//matrix generation, GEM, solution by substitution, printing
 class Task {
 public:
 	Task(){}
-	//Task(const Task &t) {
-	//	Task t_new;
-	//	t_new.solution = t.solution;
-	//	t_new.matrix = t.matrix;
-	//	t_new.id = t.id;
-	//	return; t_new;
-	//}
 	Task(const int task_id){
 		id = task_id;
 
@@ -43,14 +37,13 @@ public:
 		rng.seed(std::random_device{}());
 		matrix = std::vector<std::vector<double>>(MATRIX_DIM);
 		for(int i =0; i < MATRIX_DIM; i++) {
-			vector<double> row(MATRIX_DIM + 1);
+			std::vector<double> row(MATRIX_DIM + 1);
 			for(int j = 0; j < MATRIX_DIM + 1; j++) {
 				row[j]= distribution(rng);
 			}
 			matrix[i] = row;
 		}
 	}
-
 	void GaussianElimination() {
 		upper_triangular= MakeUpperTriangular(matrix);
 		std::cout << "Processed matrix: " << id << std::endl;
@@ -60,9 +53,9 @@ public:
 		GetValues(upper_triangular, solution);
 		std::cout << "Solved matrix: " << id << std::endl;
 	}
-	void PrintSolution(ofstream &file) {
+	void PrintSolution(std::ofstream &file) {
 		file.precision(3);
-		file << "Solved matrix with id: " << id << endl;
+		file << "Solved matrix with id: " << id << std::endl;
 		file << "Matrix data: " << std::endl;;
 		for(auto& row : matrix) {
 			for(auto& element : row) {
@@ -70,36 +63,29 @@ public:
 			}
 			file << std::endl;
 		}
-		file << "Upper triangular matrix: " << std::endl;;
-		for(auto& row : upper_triangular) {
-			for(auto& element : row) {
-				file << std::setw(6) <<  element << " ";
-			}
-			file << std::endl;
-		}
-		file << "Matrix slution: " << solution.size() << std::endl;;
+		//file << "Upper triangular matrix: " << std::endl;;
+		//for(auto& row : upper_triangular) {
+		//	for(auto& element : row) {
+		//		file << std::setw(6) <<  element << " ";
+		//	}
+		//	file << std::endl;
+		//}
+		file << "Matrix slution: "  << std::endl;;
 		for(auto& sol : solution) {
 			file << sol << " ";
 		}
 		file << std::endl;
 	}
-
-
 	std::vector<std::vector<double>> matrix;
 	std::vector<std::vector<double>> upper_triangular;
 	std::vector<double> solution;
 	std::uint32_t id;
 };
 
-//Works the same as master from the .pdf
 
-std::mutex m;
-
+//TaskQueue for handling data transfer from matrix generator to threadpool
 class TaskQueue {
 public:
-	//TaskQueue(void) {
-	//	q_mutex = std::unique_lock<std::mutex>(m);
-	//}
 	TaskQueue* Subscribe() {
 		return this;
 	}
@@ -121,12 +107,13 @@ public:
 	std::unique_lock<std::mutex> q_mutex;
 	std::condition_variable cond_full;
 	std::condition_variable cond_empty;
-	atomic_bool terminate = false;
+	std::atomic_bool terminate = false;
 private:
 	std::queue<Task> queue;
 	const int max_items = 20;
 };
 
+//Generating matrices
 class MatrxiGenerator {
 public:
 	MatrxiGenerator(TaskQueue* task_queue) :
@@ -143,12 +130,9 @@ public:
 			}
 			std::unique_lock<std::mutex> ul(mut);
 			if(!task_queue->Full()) {
-				//task_queue->q_mutex.lock();
 				task_queue->Push(task);
-				//task_queue->q_mutex.unlock();
 			}
 			else {
-				//task_queue->cond_full.wait(task_queue->q_mutex, [&] {return !task_queue->Full(); });
 				task_queue->cond_full.wait(ul, [&] {return !task_queue->Full(); });
 				task_queue->Push(task);
 			}
@@ -160,10 +144,11 @@ public:
 	uint32_t matrix_id = 0;
 };
 
+//Printer class
 class MatrixPrinter {
 public:
 	MatrixPrinter() {
-		myfile.open("matrixresults.txt");
+		myfile.open("results.txt");
 		
 	}
 	~MatrixPrinter() {
@@ -191,7 +176,7 @@ public:
 		return this;
 	}
 
-	ofstream myfile;
+	std::ofstream myfile;
 	Task matrix_task;
 	std::atomic_bool matrix_task_rdy = false;
 	std::atomic_bool terminate = false;
@@ -222,23 +207,23 @@ public:
 					return;
 				}
 				cond_data_rdy.wait(ul, [&] {return matrix_task_rdy || terminate; });
+				matrix_task.MatrixSolution();
+				matrix_task_rdy = false;
+
 				if(terminate) {
 					printer->terminate = true;
 					printer->printer_data_rdy.notify_all();
 					return;
 				}
 			}
-			//TODO changed this
 			std::unique_lock<std::mutex> print_ul(print_mut);
 			if(printer->matrix_task_rdy == false) {
 				printer->matrix_task = matrix_task;
-				//printer->matrix_task = Task(matrix_task);
 				printer->matrix_task_rdy = true;
 			}
 			else {
 				printer->printer_rdy.wait(print_ul, [&] {return printer->matrix_task_rdy == false; });
 				printer->matrix_task = matrix_task;
-				//printer->matrix_task = Task(matrix_task);
 				printer->matrix_task_rdy = true;
 			}
 			ul.unlock();
@@ -267,14 +252,10 @@ public:
 			}
 			else{
 				if(task_queue->terminate) {
-					solver->terminate = true;
-					solver->cond_data_rdy.notify_all();
 					return;
 				}
 				task_queue->cond_empty.wait(ul, [&] {return !task_queue->Empty() || task_queue->terminate; });
 				if(task_queue->terminate) {
-					solver->terminate = true;
-					solver->cond_data_rdy.notify_all();
 					return;
 				}
 				task = task_queue->Pop();
@@ -305,20 +286,22 @@ public:
 			workers.push_back(SpawnThread());
 		}
 	}
-	~ThreadPool() {
+	void CloseThreadPool()
+	{
 		for(auto &worker : workers) {
 			worker.join();
 		}
+		solver->terminate = true;
+		solver->cond_data_rdy.notify_all();
 	}
-
 const int workers_count;
 std::vector<std::thread> workers;
 TaskQueue* task_queue;
 MatrixSolver* solver;
 };
 
-
 int main() {
+	//This order is predefined, changing this could cause undefined behaviour
 	TaskQueue task_queue;
 	MatrxiGenerator matrix_gen(task_queue.Subscribe());
 	MatrixPrinter matrix_printer;
@@ -328,7 +311,7 @@ int main() {
 	ThreadPool thread_pool(10, task_queue.Subscribe(), matrix_solver.Subscribe());
 	std::thread generator([&] {matrix_gen.Run(); });
 
-
+	thread_pool.CloseThreadPool();
 	generator.join();
 	solver.join();
 	printer.join();
